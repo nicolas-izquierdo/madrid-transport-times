@@ -1,0 +1,50 @@
+name: Collect CRTM Arrival Times
+
+on:
+  schedule:
+    # 6× daily at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+    # In Madrid time (CET/CEST +1/+2): 01/05, 05/09, 09/13, 13/17, 17/21, 21/01
+    - cron: '0 0,4,8,12,16,20 * * *'
+  workflow_dispatch:   # allow manual trigger from GitHub UI
+
+jobs:
+  collect:
+    name: Poll CRTM API and commit data
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write   # needed to push collected data back to repo
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run collection script
+        run: python collect.py
+
+      - name: Commit and push new data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage collected data and updated stop cache only
+          git add data/ stops_cache.json 2>/dev/null || true
+
+          # Only commit if there is something new
+          if git diff --staged --quiet; then
+            echo "Nothing to commit."
+          else
+            RUN_TIME=$(date -u +"%Y-%m-%dT%H:%MZ")
+            git commit -m "data: collection run ${RUN_TIME}"
+            git push
+          fi
