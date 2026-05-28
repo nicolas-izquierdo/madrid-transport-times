@@ -309,6 +309,9 @@ def main() -> None:
 
     with requests.Session() as session:
         session.headers.update(HEADERS)
+        # Pool size must match MAX_WORKERS to avoid "pool is full" warnings
+        adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
+        session.mount("https://", adapter)
 
         for poll_index in range(N_POLLS):
             round_start = time.monotonic()
