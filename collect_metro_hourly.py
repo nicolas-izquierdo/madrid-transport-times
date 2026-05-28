@@ -62,8 +62,8 @@ HF_REPO      = "nicolas-izquierdo/madrid-transport-times"
 HF_REPO_TYPE = "dataset"
 
 # Collection parameters
-POLL_INTERVAL_S = 300    # 5 minutes between poll starts
-N_POLLS         = 11     # 11 × 5 min = 55 min of data per hourly job
+POLL_INTERVAL_S = 60     # 1 minute between poll starts (gold standard — subwaydata.nyc)
+N_POLLS         = 55     # 55 × 1 min = 55 min of data per hourly job
 MAX_WORKERS     = 20     # parallel API calls for ~293 Metro stops
 REQUEST_TIMEOUT = 12     # seconds; fail fast, retry once
 RETRY_ATTEMPTS  = 2
@@ -301,7 +301,7 @@ def main() -> None:
         "Metro hourly collection — %s UTC",
         hour_start.strftime("%Y-%m-%d %H:00"),
     )
-    logging.info("Plan: %d polls × %d-sec interval → 1 hourly Parquet → HF", N_POLLS, POLL_INTERVAL_S)
+    logging.info("Plan: %d polls × %d-sec interval (~1 min, subwaydata.nyc standard) → 1 hourly Parquet → HF", N_POLLS, POLL_INTERVAL_S)
     logging.info("=" * 60)
 
     stops = load_metro_stops()
