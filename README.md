@@ -5,7 +5,6 @@ metropolitan area, collected continuously from the CRTM (Consorcio Regional de
 Transportes de Madrid) API.
 
 **Part of a research project on Madrid public transport performance.**  
-Contact: paizquie@clio.uc3m.es
 
 ---
 
