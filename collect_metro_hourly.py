@@ -1,21 +1,25 @@
 """
 Madrid Metro Real-Time Arrivals — Hourly High-Frequency Collector
 =================================================================
-Polls all Metro de Madrid stations every 5 minutes for one hour,
+Polls all Metro de Madrid stations every minute for ~55 minutes,
 then writes a single hourly Parquet file directly to Hugging Face
 Datasets. Zero data stored in the GitHub repository.
 
 Design principles (inspired by subwaydata.nyc and mta-bus-archive):
-  - Immutable, append-only files. Never overwrite.
+  - Immutable, append-only files per hour.
   - Clear partition scheme: metro/YYYY-MM/YYYY-MM-DD_HH00.parquet
-  - poll_index field tracks which 5-min interval produced each row.
+  - poll_index field tracks which 1-min interval produced each row.
   - Graceful degradation: API failures are logged, never crash the run.
   - Zstandard compression via Parquet (best ratio + fast decompression).
+  - Checkpoint pushes every CHECKPOINT_EVERY polls — if the job dies,
+    the last checkpoint is already on HF (max data loss = CHECKPOINT_EVERY min).
+    Each checkpoint overwrites the same file; HF git history preserves all
+    intermediate versions automatically.
 
 Runs as a GitHub Actions job (cron: every hour). Each job:
-  1. Loops 11 × 5-minute collection rounds (55 min of data)
-  2. Writes one Parquet file (~21k rows, ~300 KB compressed)
-  3. Pushes to HF via huggingface_hub — one commit per hour
+  1. Loops 55 × 1-minute collection rounds (55 min of data)
+  2. Pushes a checkpoint Parquet to HF every CHECKPOINT_EVERY polls
+  3. Final push at the end — one clean file per hour on HF
 
 Required env var (GitHub Actions secret):
   HF_TOKEN — Hugging Face write-access token
@@ -62,11 +66,12 @@ HF_REPO      = "nicolas-izquierdo/madrid-transport-times"
 HF_REPO_TYPE = "dataset"
 
 # Collection parameters
-POLL_INTERVAL_S = 60     # 1 minute between poll starts (gold standard — subwaydata.nyc)
-N_POLLS         = 55     # 55 × 1 min = 55 min of data per hourly job
-MAX_WORKERS     = 20     # parallel API calls for ~293 Metro stops
-REQUEST_TIMEOUT = 12     # seconds; fail fast, retry once
-RETRY_ATTEMPTS  = 2
+POLL_INTERVAL_S  = 60    # 1 minute between poll starts (gold standard — subwaydata.nyc)
+N_POLLS          = 55    # 55 × 1 min = 55 min of data per hourly job
+MAX_WORKERS      = 20    # parallel API calls for ~293 Metro stops
+REQUEST_TIMEOUT  = 12    # seconds; fail fast, retry once
+RETRY_ATTEMPTS   = 2
+CHECKPOINT_EVERY = 10    # push to HF every N polls (overwrites same file); max data loss = N min
 
 # Parquet schema — explicit types for storage efficiency
 # Using dictionary encoding for low-cardinality string columns
@@ -289,7 +294,7 @@ def push_to_hf(parquet_bytes: bytes, hour_dt: datetime, n_rows: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Main loop — checkpoint push every CHECKPOINT_EVERY polls
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -301,7 +306,10 @@ def main() -> None:
         "Metro hourly collection — %s UTC",
         hour_start.strftime("%Y-%m-%d %H:00"),
     )
-    logging.info("Plan: %d polls × %d-sec interval (~1 min, subwaydata.nyc standard) → 1 hourly Parquet → HF", N_POLLS, POLL_INTERVAL_S)
+    logging.info(
+        "Plan: %d polls × %d-sec interval — checkpoint every %d polls (max loss: %d min)",
+        N_POLLS, POLL_INTERVAL_S, CHECKPOINT_EVERY, CHECKPOINT_EVERY,
+    )
     logging.info("=" * 60)
 
     stops = load_metro_stops()
@@ -309,8 +317,9 @@ def main() -> None:
 
     with requests.Session() as session:
         session.headers.update(HEADERS)
-        # Pool size must match MAX_WORKERS to avoid "pool is full" warnings
-        adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS
+        )
         session.mount("https://", adapter)
 
         for poll_index in range(N_POLLS):
@@ -318,24 +327,24 @@ def main() -> None:
             rows = collect_round(stops, session, poll_index)
             all_rows.extend(rows)
 
-            if poll_index < N_POLLS - 1:
+            is_last       = poll_index == N_POLLS - 1
+            is_checkpoint = (poll_index + 1) % CHECKPOINT_EVERY == 0
+
+            if (is_checkpoint or is_last) and all_rows:
+                logging.info(
+                    "  Checkpoint at poll %d/%d — serialising %d rows → HF...",
+                    poll_index + 1, N_POLLS, len(all_rows),
+                )
+                parquet_bytes = to_parquet_bytes(all_rows)
+                push_to_hf(parquet_bytes, hour_start, len(all_rows))
+
+            if not is_last:
                 elapsed = time.monotonic() - round_start
                 wait = max(0.0, POLL_INTERVAL_S - elapsed)
                 logging.info("  Waiting %.0f s until next poll...", wait)
                 time.sleep(wait)
 
-    logging.info("Collection complete: %d total rows from %d polls", len(all_rows), N_POLLS)
-
-    if not all_rows:
-        logging.warning("No data collected — skipping HF push")
-        return
-
-    logging.info("Serialising to Parquet (zstd)...")
-    parquet_bytes = to_parquet_bytes(all_rows)
-    logging.info("Parquet size: %d KB (%d rows)", len(parquet_bytes) // 1024, len(all_rows))
-
-    push_to_hf(parquet_bytes, hour_start, len(all_rows))
-    logging.info("Done.")
+    logging.info("Done. %d total rows from %d polls.", len(all_rows), N_POLLS)
 
 
 if __name__ == "__main__":
