@@ -1,0 +1,38 @@
+name: Collect Metro Arrivals (High-Frequency → Hugging Face)
+
+# Runs every hour. Each job polls all Metro stations every 5 minutes
+# for 55 minutes, then pushes one hourly Parquet file to HF Datasets.
+# Zero data stored in this GitHub repository.
+
+on:
+  schedule:
+    - cron: '2 * * * *'   # 2 min past each hour (avoid GitHub Actions rush at :00)
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+concurrency:
+  group: collect-metro
+  cancel-in-progress: false  # queue, don't cancel — never lose a run
+
+jobs:
+  collect:
+    name: Poll Metro → Parquet → HF
+    runs-on: ubuntu-latest
+    timeout-minutes: 70      # 55 min data + ~10 min setup/push headroom
+
+    steps:
+      - name: Check out repository (code only, no data)
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect and push to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python collect_metro_hourly.py
