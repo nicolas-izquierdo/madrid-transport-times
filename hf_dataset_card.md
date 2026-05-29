@@ -50,8 +50,8 @@ metro/
     └── YYYY-MM-DD_HH00.parquet    ← one file per hour, UTC
 ```
 
-Each Parquet file contains approximately 55 poll rounds × ~1,750 rows = ~96,000 rows.
-Compression: Zstandard, ~1–2 MB per file.
+Each Parquet file contains approximately 55 poll rounds × ~1,100 rows = ~61,000 rows (peak hours; night files smaller).
+Compression: Zstandard, ~150–270 KB per file (peak hours); sparse night files smaller.
 
 ---
 
