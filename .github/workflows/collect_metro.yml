@@ -1,6 +1,6 @@
 name: Collect Metro Arrivals (High-Frequency → Hugging Face)
 
-# Runs every hour. Each job polls all Metro stations every 5 minutes
+# Runs every hour. Each job polls all Metro stations every 1 minute
 # for 55 minutes, then pushes one hourly Parquet file to HF Datasets.
 # Zero data stored in this GitHub repository.
 

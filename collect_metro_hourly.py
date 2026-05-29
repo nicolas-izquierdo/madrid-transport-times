@@ -91,7 +91,7 @@ SCHEMA = pa.schema([
     pa.field("minutes_to_arrival", pa.int16(),
              metadata={"description": "Minutes until predicted arrival at poll time"}),
     pa.field("poll_index",         pa.int8(),
-             metadata={"description": "Which 5-min interval (0-10) within this hourly run"}),
+             metadata={"description": "Which 1-min interval (0-54) within this hourly run"}),
 ])
 
 
@@ -241,7 +241,7 @@ def collect_round(
 # Parquet serialisation
 # ---------------------------------------------------------------------------
 
-def to_parquet_bytes(rows: list[dict]) -> bytes:
+def to_parquet_bytes(rows: list[dict], job_start: datetime, hour_start: datetime) -> bytes:
     arrays = {field.name: [] for field in SCHEMA}
     for row in rows:
         for field in SCHEMA:
@@ -252,6 +252,18 @@ def to_parquet_bytes(rows: list[dict]) -> bytes:
          for name, vals in arrays.items()},
         schema=SCHEMA,
     )
+
+    # File-level metadata: lets downstream users verify actual vs. scheduled window.
+    # Readable without loading rows: pq.read_schema("file.parquet").metadata
+    file_meta = {
+        b"actual_job_start_utc": job_start.isoformat().encode(),
+        b"scheduled_slot_utc":   hour_start.isoformat().encode(),
+        b"n_rows":               str(len(rows)).encode(),
+        b"poll_interval_s":      str(POLL_INTERVAL_S).encode(),
+        b"n_polls_target":       str(N_POLLS).encode(),
+    }
+    existing_meta = table.schema.metadata or {}
+    table = table.replace_schema_metadata({**existing_meta, **file_meta})
 
     buf = BytesIO()
     pq.write_table(
@@ -267,8 +279,11 @@ def to_parquet_bytes(rows: list[dict]) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Hugging Face upload
+# Hugging Face upload — with exponential-backoff retry
 # ---------------------------------------------------------------------------
+
+HF_PUSH_RETRIES    = 3
+HF_PUSH_BACKOFF_S  = 30   # wait 30s, then 60s before final attempt
 
 def push_to_hf(parquet_bytes: bytes, hour_dt: datetime, n_rows: int) -> None:
     token = os.environ.get("HF_TOKEN")
@@ -283,14 +298,31 @@ def push_to_hf(parquet_bytes: bytes, hour_dt: datetime, n_rows: int) -> None:
     commit_msg   = f"data: metro {date_str} {hour_str}:00 UTC ({n_rows:,} rows)"
 
     logging.info("Pushing to HF: %s/%s", HF_REPO, path_in_repo)
-    api.upload_file(
-        path_or_fileobj=parquet_bytes,
-        path_in_repo=path_in_repo,
-        repo_id=HF_REPO,
-        repo_type=HF_REPO_TYPE,
-        commit_message=commit_msg,
-    )
-    logging.info("Pushed successfully (%d KB)", len(parquet_bytes) // 1024)
+    for attempt in range(HF_PUSH_RETRIES):
+        try:
+            api.upload_file(
+                path_or_fileobj=parquet_bytes,
+                path_in_repo=path_in_repo,
+                repo_id=HF_REPO,
+                repo_type=HF_REPO_TYPE,
+                commit_message=commit_msg,
+            )
+            logging.info("Pushed successfully (%d KB)", len(parquet_bytes) // 1024)
+            return
+        except Exception as exc:
+            if attempt < HF_PUSH_RETRIES - 1:
+                wait = HF_PUSH_BACKOFF_S * (2 ** attempt)
+                logging.warning(
+                    "HF push failed (attempt %d/%d): %s — retrying in %ds",
+                    attempt + 1, HF_PUSH_RETRIES, exc, wait,
+                )
+                time.sleep(wait)
+            else:
+                logging.error(
+                    "HF push failed after %d attempts: %s — checkpoint data may be lost",
+                    HF_PUSH_RETRIES, exc,
+                )
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -299,12 +331,24 @@ def push_to_hf(parquet_bytes: bytes, hour_dt: datetime, n_rows: int) -> None:
 
 def main() -> None:
     setup_logging()
-    hour_start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    job_start  = datetime.now(timezone.utc)
+    hour_start = job_start.replace(minute=0, second=0, microsecond=0)
+
+    delay_min = int((job_start - hour_start).total_seconds() / 60)
+    if delay_min > 5:
+        logging.warning(
+            "Job started %d min after scheduled slot — file label %s may not match "
+            "actual collection window (actual start %s UTC)",
+            delay_min,
+            hour_start.strftime("%Y-%m-%d %H:00"),
+            job_start.strftime("%H:%M"),
+        )
 
     logging.info("=" * 60)
     logging.info(
-        "Metro hourly collection — %s UTC",
+        "Metro hourly collection — slot %s UTC (actual start %s UTC)",
         hour_start.strftime("%Y-%m-%d %H:00"),
+        job_start.strftime("%H:%M"),
     )
     logging.info(
         "Plan: %d polls × %d-sec interval — checkpoint every %d polls (max loss: %d min)",
@@ -335,7 +379,7 @@ def main() -> None:
                     "  Checkpoint at poll %d/%d — serialising %d rows → HF...",
                     poll_index + 1, N_POLLS, len(all_rows),
                 )
-                parquet_bytes = to_parquet_bytes(all_rows)
+                parquet_bytes = to_parquet_bytes(all_rows, job_start=job_start, hour_start=hour_start)
                 push_to_hf(parquet_bytes, hour_start, len(all_rows))
 
             if not is_last:
