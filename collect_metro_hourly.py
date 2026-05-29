@@ -114,6 +114,23 @@ def setup_logging() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Idempotency — skip if this hour's file already exists on HF
+# ---------------------------------------------------------------------------
+
+def _already_collected(hour_start: datetime) -> bool:
+    path = (
+        f"metro/{hour_start.strftime('%Y-%m')}/"
+        f"{hour_start.strftime('%Y-%m-%d_%H')}00.parquet"
+    )
+    token = os.environ.get("HF_TOKEN", "")
+    api = HfApi(token=token) if token else HfApi()
+    try:
+        return api.file_exists(path, repo_id=HF_REPO, repo_type=HF_REPO_TYPE)
+    except Exception:
+        return False   # on error, proceed with collection
+
+
+# ---------------------------------------------------------------------------
 # Stop loading — Metro only
 # ---------------------------------------------------------------------------
 
@@ -333,6 +350,15 @@ def main() -> None:
     setup_logging()
     job_start  = datetime.now(timezone.utc)
     hour_start = job_start.replace(minute=0, second=0, microsecond=0)
+
+    # Idempotency: if both cron-job.org dispatch and schedule trigger fire for the
+    # same hour, only the first one should collect. The second exits immediately.
+    if _already_collected(hour_start):
+        logging.info(
+            "Slot %s already on HF — duplicate trigger, exiting.",
+            hour_start.strftime("%Y-%m-%d %H:00 UTC"),
+        )
+        return
 
     delay_min = int((job_start - hour_start).total_seconds() / 60)
     if delay_min > 5:
