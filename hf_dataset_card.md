@@ -21,7 +21,7 @@ size_categories:
 # Madrid Metro Real-Time Arrivals
 
 Continuously collected real-time arrival predictions for all Metro de Madrid
-stations, polled every 5 minutes from the CRTM public API.
+stations, polled every minute from the CRTM public API.
 
 **This is the first public historical archive of Metro de Madrid real-time
 operational data.** No equivalent dataset exists for any European metro system.
@@ -37,7 +37,7 @@ real-time predictions, not nominal schedule times.
 
 **Modes covered:** Metro de Madrid only (all 13 lines, ~293 stations).  
 **Collection started:** May 2026.  
-**Update frequency:** Every 5 minutes (24 hourly Parquet files per day).  
+**Update frequency:** Every 1 minute — 55 polls per hourly job (24 hourly Parquet files per day).  
 **Collection method:** GitHub Actions polling the CRTM public REST API.
 
 ---
@@ -50,8 +50,8 @@ metro/
     └── YYYY-MM-DD_HH00.parquet    ← one file per hour, UTC
 ```
 
-Each Parquet file contains approximately 11 poll rounds × ~1,750 rows = ~19,000 rows.
-Compression: Zstandard, ~250–350 KB per file.
+Each Parquet file contains approximately 55 poll rounds × ~1,750 rows = ~96,000 rows.
+Compression: Zstandard, ~1–2 MB per file.
 
 ---
 
@@ -67,7 +67,7 @@ Compression: Zstandard, ~250–350 KB per file.
 | `destination` | string | Terminal destination of this service |
 | `arrival_time` | timestamp (UTC) | Predicted arrival time |
 | `minutes_to_arrival` | int16 | Minutes until arrival at poll time |
-| `poll_index` | int8 | Which 5-min round (0–10) within the hourly file |
+| `poll_index` | int8 | Which 1-min round (0–54) within the hourly file |
 
 ---
 
